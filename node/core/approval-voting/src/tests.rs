@@ -2260,6 +2260,106 @@ fn subsystem_process_wakeup_trigger_assignment_launch_approval() {
 	});
 }
 
+#[test]
+fn mytestaaa() {
+	let assignment_criteria = Box::new(MockAssignmentCriteria(
+		|| {
+			let mut assignments = HashMap::new();
+			let _ = assignments.insert(
+				CoreIndex(0),
+				approval_db::v1::OurAssignment {
+					cert: garbage_assignment_cert(AssignmentCertKind::RelayVRFModulo { sample: 0 }),
+					tranche: 0,
+					validator_index: ValidatorIndex(0),
+					triggered: false,
+				}
+				.into(),
+			);
+			assignments
+		},
+		|_| Ok(0),
+	));
+	let config = HarnessConfigBuilder::default().assignment_criteria(assignment_criteria).build();
+	let store = config.backend();
+	let session = 2u32;
+
+	test_harness(config, |test_harness| async move {
+		let TestHarness {
+			mut virtual_overseer,
+			clock,
+			sync_oracle_handle: _sync_oracle_handle,
+			..
+		} = test_harness;
+
+		let candidate_receipt = CandidateReceipt::<Hash>::default();
+		let candidate_hash = candidate_receipt.hash();
+
+		let candidate_index = 0;
+
+		let mut head: Hash = ChainBuilder::GENESIS_HASH;
+		let mut builder = ChainBuilder::new();
+		for i in 1..=session {
+			let slot = Slot::from(i as u64);
+			let hash = Hash::repeat_byte(i as u8);
+
+			let mut candidate_receipt = CandidateReceipt::<Hash>::default();
+			candidate_receipt.descriptor.para_head = hash;
+
+			builder.add_block(
+				hash,
+				head,
+				i,
+				BlockConfig {
+					slot,
+					candidates: Some(vec![(candidate_receipt, CoreIndex(0), GroupIndex(0))]),
+					session_info: None,
+				},
+			);
+			head = hash;
+		}
+		builder.build(&mut virtual_overseer).await;
+
+		futures_timer::Delay::new(Duration::from_millis(200)).await;
+		{
+			let inner = clock.inner.lock();
+			dbg!(&inner.wakeups);
+		}
+		// assert!(!clock.inner.lock().current_wakeup_is(1));
+		// clock.inner.lock().wakeup_all(1);
+
+		// // assert!(clock.inner.lock().current_wakeup_is(slot_to_tick(slot)));
+		clock.inner.lock().wakeup_all(slot_to_tick(2));
+
+		futures_timer::Delay::new(Duration::from_millis(200)).await;
+		{
+			let inner = clock.inner.lock();
+			dbg!(&inner.wakeups);
+		}
+		// assert!(clock.inner.lock().current_wakeup_is(slot_to_tick(slot + 2)));
+		clock.inner.lock().wakeup_all(slot_to_tick(2 + 2));
+
+		assert_matches!(
+			overseer_recv(&mut virtual_overseer).await,
+			AllMessages::ApprovalDistribution(ApprovalDistributionMessage::DistributeAssignment(
+				_,
+				c_index,
+			)) => {
+				assert_eq!(candidate_index, c_index);
+			}
+		);
+
+		assert_eq!(clock.inner.lock().wakeups.len(), 0);
+
+		futures_timer::Delay::new(Duration::from_millis(200)).await;
+
+		while let Some(msg) = virtual_overseer.recv().now_or_never() {
+			dbg!(msg);
+		}
+
+		virtual_overseer
+	});
+}
+
 struct TriggersAssignmentConfig<F1, F2> {
 	our_assigned_tranche: DelayTranche,
 	assign_validator_tranche: F1,
